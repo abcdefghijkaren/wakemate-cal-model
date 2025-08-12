@@ -1,19 +1,47 @@
-# 清醒度數據計算邏輯
+# 清醒度數據計算邏輯 alertness_data.py
+
 import pandas as pd
 import numpy as np
 from datetime import timedelta
+from database import get_db_connection
+
+def fetch_alertness_data():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM alertness_data;")  # 變更
+    rows = cursor.fetchall()
+    colnames = [desc[0] for desc in cursor.description]
+    cursor.close()
+    conn.close()
+    df = pd.DataFrame(rows, columns=colnames)
+    if df.empty:
+        return pd.DataFrame()
+    df = df.drop_duplicates(subset=["user_id", "timestamp"])
+    return df
 
 def run_alertness_data(conn):
     cursor = conn.cursor()
 
-    caffeine_query = "SELECT * FROM users_real_time_intake;"
-    caffeine_df = pd.read_sql_query(caffeine_query, conn, parse_dates=["taking_timestamp"])
+    # 變更：改成 fetchall() 再 DataFrame
+    cursor.execute("SELECT * FROM users_real_time_intake;")
+    rows = cursor.fetchall()
+    colnames = [desc[0] for desc in cursor.description]
+    caffeine_df = pd.DataFrame(rows, columns=colnames)
+    caffeine_df["taking_timestamp"] = pd.to_datetime(caffeine_df["taking_timestamp"])
 
-    sleep_query = "SELECT * FROM users_real_sleep_data;"
-    sleep_df = pd.read_sql_query(sleep_query, conn, parse_dates=["start_time", "end_time"])
+    cursor.execute("SELECT * FROM users_real_sleep_data;")
+    rows = cursor.fetchall()
+    colnames = [desc[0] for desc in cursor.description]
+    sleep_df = pd.DataFrame(rows, columns=colnames)
+    sleep_df["start_time"] = pd.to_datetime(sleep_df["start_time"])
+    sleep_df["end_time"] = pd.to_datetime(sleep_df["end_time"])
 
-    target_query = "SELECT * FROM users_target_waking_period;"
-    target_df = pd.read_sql_query(target_query, conn, parse_dates=["target_start_time", "target_end_time"])
+    cursor.execute("SELECT * FROM users_target_waking_period;")
+    rows = cursor.fetchall()
+    colnames = [desc[0] for desc in cursor.description]
+    target_df = pd.DataFrame(rows, columns=colnames)
+    target_df["target_start_time"] = pd.to_datetime(target_df["target_start_time"])
+    target_df["target_end_time"] = pd.to_datetime(target_df["target_end_time"])
 
     M_c = 1.1
     k_a = 1.0
@@ -43,14 +71,12 @@ def run_alertness_data(conn):
         P0_values[i] = P0_base + sigmoid(hour) if is_awake else P0_base
 
     g_PD = np.ones(len(time_index), dtype=float)
-
     for _, row in caffeine_df.iterrows():
         take_time = row["taking_timestamp"]
         dose = float(row["caffeine_amount"])
         t_0 = int((take_time - start_time).total_seconds() // 3600)
         if t_0 >= len(t):
             continue
-
         effect = 1 / (1 + (M_c * dose / 200) * (k_a / (k_a - k_c)) *
                       (np.exp(-k_c * (t - t_0)) - np.exp(-k_a * (t - t_0))))
         effect = np.where(t < t_0, 1, effect)
@@ -59,14 +85,12 @@ def run_alertness_data(conn):
     P_t_caffeine = P0_values * g_PD
 
     g_PD_real = np.ones(len(time_index), dtype=float)
-
     for _, row in caffeine_df.iterrows():
         take_time = row["taking_timestamp"]
         dose = float(row["caffeine_amount"])
         t_0 = int((take_time - start_time).total_seconds() // 3600)
         if t_0 >= len(t):
             continue
-
         effect = 1 / (1 + (M_c * dose / 200) * (k_a / (k_a - k_c)) *
                       (np.exp(-k_c * (t - t_0)) - np.exp(-k_a * (t - t_0))))
         effect = np.where(t < t_0, 1, effect)
@@ -83,7 +107,16 @@ def run_alertness_data(conn):
         cursor.execute("""
             INSERT INTO alertness_data_for_visualization (user_id, timestamp, awake, "g_PD", "P0_values", "P_t_caffeine", "P_t_no_caffeine", "P_t_real")
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        """, (caffeine_df['user_id'].iloc[0], time_index[i], awake_flags[i].item(), float(g_PD[i]), float(P0_values[i]), float(P_t_caffeine[i]), float(P_t_no_caffeine[i]), float(P_t_real[i])))
+        """, (
+            caffeine_df['user_id'].iloc[0],
+            time_index[i],
+            awake_flags[i].item(),
+            float(g_PD[i]),
+            float(P0_values[i]),
+            float(P_t_caffeine[i]),
+            float(P_t_no_caffeine[i]),
+            float(P_t_real[i])
+        ))
 
     conn.commit()
     cursor.close()
