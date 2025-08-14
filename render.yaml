@@ -1,15 +1,10 @@
 services:
   - type: web
-    name: wakemate-backend
+    name: wakemate-cal-model
+    env: python
     plan: free
-    build:
-      dockerfile: Dockerfile
-      # 強制 Render 使用 Python 3.11
-      environment:
-        python_version: 3.11.9
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port 10000
     envVars:
       - key: DATABASE_URL
-        fromDatabase:
-          name: user_info_wakemate_db
-          property: connectionString
-    healthCheckPath: /ping
+        sync: false
