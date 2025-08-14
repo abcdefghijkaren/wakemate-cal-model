@@ -2,11 +2,10 @@ services:
   - type: cron job
     name: wakemate-cal-model
     env: python
-    pythonVersion: 3.11.9
     plan: starter
     buildCommand: |
       pip install --upgrade pip setuptools wheel
-      pip install -r requirements.txt
+      pip install --only-binary=:all: -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port 10000
     envVars:
       - key: DATABASE_URL
