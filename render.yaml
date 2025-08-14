@@ -2,6 +2,7 @@ services:
   - type: cron job
     name: wakemate-cal-model
     env: python
+    pythonVersion: 3.11.9
     plan: starter
     buildCommand: |
       pip install --upgrade pip setuptools wheel
