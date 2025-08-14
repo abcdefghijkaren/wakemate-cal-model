@@ -1,7 +1,8 @@
-fastapi==0.110.0
-uvicorn==0.29.0
-sqlalchemy==2.0.30
-psycopg2-binary==2.9.10
+fastapi==0.112.0
+uvicorn==0.30.6
+pandas==2.2.2
+numpy==1.26.4
+psycopg2-binary==2.9.9
+SQLAlchemy==2.0.32
 python-dotenv==1.0.1
-pandas==2.2.2 --only-binary=:all:
-numpy==1.26.4 --only-binary=:all:
+pytz==2024.1
