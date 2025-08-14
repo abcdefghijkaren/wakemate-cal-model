@@ -4,9 +4,7 @@ services:
     env: python
     plan: starter
     buildCommand: |
-      apt-get update && \
-      apt-get install -y --no-install-recommends build-essential python3-dev libpq-dev libatlas-base-dev libopenblas-dev gfortran && \
-      pip install --upgrade pip && \
+      pip install --upgrade pip setuptools wheel
       pip install -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port 10000
     envVars:
