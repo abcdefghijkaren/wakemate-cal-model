@@ -8,6 +8,10 @@ def main():
     # 連資料庫
     conn = get_db_connection()
     
+    if conn is None:
+        print("無法連到資料庫")
+        return
+    
     try:
         # 執行咖啡因建議計算
         run_caffeine_recommendation(conn)
@@ -15,7 +19,6 @@ def main():
         run_alertness_data(conn)
     except Exception as e:
         print(f"[ERROR] {e}")
-    
     finally:
         # 關閉連線
         conn.close()
