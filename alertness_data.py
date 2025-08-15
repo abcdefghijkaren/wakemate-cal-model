@@ -1,6 +1,5 @@
 # 清醒度數據計算邏輯 alertness_data.py
 
-import pandas as pd
 import numpy as np
 from datetime import timedelta
 from database import get_db_connection
@@ -8,40 +7,36 @@ from database import get_db_connection
 def fetch_alertness_data():
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM alertness_data;")  # 變更
+    cursor.execute("SELECT * FROM alertness_data_for_visualization;")
     rows = cursor.fetchall()
     colnames = [desc[0] for desc in cursor.description]
     cursor.close()
     conn.close()
-    df = pd.DataFrame(rows, columns=colnames)
-    if df.empty:
-        return pd.DataFrame()
-    df = df.drop_duplicates(subset=["user_id", "timestamp"])
-    return df
+
+    if not rows:
+        return []
+
+    # 將資料轉換為字典列表
+    data = [dict(zip(colnames, row)) for row in rows]
+    return data
 
 def run_alertness_data(conn):
     cursor = conn.cursor()
 
-    # 變更：改成 fetchall() 再 DataFrame
     cursor.execute("SELECT * FROM users_real_time_intake;")
     rows = cursor.fetchall()
     colnames = [desc[0] for desc in cursor.description]
-    caffeine_df = pd.DataFrame(rows, columns=colnames)
-    caffeine_df["taking_timestamp"] = pd.to_datetime(caffeine_df["taking_timestamp"])
+    caffeine_data = [dict(zip(colnames, row)) for row in rows]
 
     cursor.execute("SELECT * FROM users_real_sleep_data;")
     rows = cursor.fetchall()
     colnames = [desc[0] for desc in cursor.description]
-    sleep_df = pd.DataFrame(rows, columns=colnames)
-    sleep_df["start_time"] = pd.to_datetime(sleep_df["start_time"])
-    sleep_df["end_time"] = pd.to_datetime(sleep_df["end_time"])
+    sleep_data = [dict(zip(colnames, row)) for row in rows]
 
     cursor.execute("SELECT * FROM users_target_waking_period;")
     rows = cursor.fetchall()
     colnames = [desc[0] for desc in cursor.description]
-    target_df = pd.DataFrame(rows, columns=colnames)
-    target_df["target_start_time"] = pd.to_datetime(target_df["target_start_time"])
-    target_df["target_end_time"] = pd.to_datetime(target_df["target_end_time"])
+    target_data = [dict(zip(colnames, row)) for row in rows]
 
     M_c = 1.1
     k_a = 1.0
@@ -51,8 +46,8 @@ def run_alertness_data(conn):
     def sigmoid(x, L=100, x0=14, k=0.2):
         return L / (1 + np.exp(-k * (x - x0)))
 
-    start_time = min(caffeine_df["taking_timestamp"].min(), sleep_df["start_time"].min()).replace(minute=0, second=0)
-    end_time = max(caffeine_df["taking_timestamp"].max(), sleep_df["end_time"].max()).replace(minute=0, second=0) + timedelta(hours=1)
+    start_time = min(caffeine_data[0]["taking_timestamp"], sleep_data[0]["start_time"]).replace(minute=0, second=0)
+    end_time = max(caffeine_data[0]["taking_timestamp"], sleep_data[0]["end_time"]).replace(minute=0, second=0) + timedelta(hours=1)
     total_hours = int((end_time - start_time).total_seconds() // 3600)
     time_index = [start_time + timedelta(hours=i) for i in range(total_hours + 1)]
     t = np.arange(total_hours + 1)
@@ -62,7 +57,7 @@ def run_alertness_data(conn):
 
     for i, time in enumerate(time_index):
         is_awake = True
-        for _, row in sleep_df.iterrows():
+        for row in sleep_data:
             if row["start_time"] <= time < row["end_time"]:
                 is_awake = False
                 break
@@ -71,7 +66,7 @@ def run_alertness_data(conn):
         P0_values[i] = P0_base + sigmoid(hour) if is_awake else P0_base
 
     g_PD = np.ones(len(time_index), dtype=float)
-    for _, row in caffeine_df.iterrows():
+    for row in caffeine_data:
         take_time = row["taking_timestamp"]
         dose = float(row["caffeine_amount"])
         t_0 = int((take_time - start_time).total_seconds() // 3600)
@@ -85,7 +80,7 @@ def run_alertness_data(conn):
     P_t_caffeine = P0_values * g_PD
 
     g_PD_real = np.ones(len(time_index), dtype=float)
-    for _, row in caffeine_df.iterrows():
+    for row in caffeine_data:
         take_time = row["taking_timestamp"]
         dose = float(row["caffeine_amount"])
         t_0 = int((take_time - start_time).total_seconds() // 3600)
@@ -108,9 +103,9 @@ def run_alertness_data(conn):
             INSERT INTO alertness_data_for_visualization (user_id, timestamp, awake, "g_PD", "P0_values", "P_t_caffeine", "P_t_no_caffeine", "P_t_real")
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """, (
-            caffeine_df['user_id'].iloc[0],
+            caffeine_data[0]['user_id'],
             time_index[i],
-            awake_flags[i].item(),
+            awake_flags[i],
             float(g_PD[i]),
             float(P0_values[i]),
             float(P_t_caffeine[i]),

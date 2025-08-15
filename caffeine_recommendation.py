@@ -1,72 +1,34 @@
 # 咖啡因建議計算邏輯 caffeine_recommendation.py
 
-import pandas as pd
 import numpy as np
 from psycopg2.extras import execute_values
 from datetime import datetime, timedelta
 from database import get_db_connection
-
-# 變更：移除 sqlalchemy 的 text & read_sql，改用 cursor.fetchall()
 def fetch_model_output():
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM model_output;")  # 變更
+    cursor.execute("SELECT * FROM recommendations_caffeine;")
     rows = cursor.fetchall()
     colnames = [desc[0] for desc in cursor.description]
     cursor.close()
     conn.close()
-
-    df = pd.DataFrame(rows, columns=colnames)
-    if df.empty:
-        return pd.DataFrame()
-
-    df = df.drop_duplicates(subset=["user_id", "timestamp"])
-    return df
-
-def generate_recommendations():
-    df = fetch_model_output()
-    if df.empty:
-        print("沒有資料可產生推薦。")
-        return
-
-    for user_id, user_df in df.groupby("user_id"):
-        print(f"產生推薦給使用者：{user_id}")
-        user_df = user_df.sort_values("timestamp")
-        for _, row in user_df.iterrows():
-            timestamp = row["timestamp"]
-            P_t_real = row["P_t_real"]
-            if P_t_real < 0.5:
-                recommendation = "建議攝取咖啡因"
-            else:
-                recommendation = "不需咖啡因"
-            insert_recommendation(user_id, timestamp, recommendation)
-
-# 變更：改成 psycopg2 cursor.execute()
-def insert_recommendation(user_id, timestamp, recommendation):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO caffeine_recommendation (user_id, timestamp, recommendation)
-        SELECT %s, %s, %s
-        WHERE NOT EXISTS (
-            SELECT 1 FROM caffeine_recommendation
-            WHERE user_id = %s AND timestamp = %s
-        );
-    """, (user_id, timestamp, recommendation, user_id, timestamp))
-    conn.commit()
-    cursor.close()
-    conn.close()
+    if not rows:
+        return []
+    # 將資料轉換為字典列表
+    data = [dict(zip(colnames, row)) for row in rows]
+    return data
 
 def run_caffeine_recommendation(conn):
     cursor = conn.cursor()
 
-    # 變更：用 fetchall()
+    # 從資料庫讀取數據
     cursor.execute("SELECT user_id, target_start_time, target_end_time FROM users_target_waking_period")
     waking_periods = cursor.fetchall()
 
     cursor.execute("SELECT user_id, start_time, end_time FROM users_real_sleep_data")
     sleep_data = cursor.fetchall()
 
+    # 參數設定
     M_c = 1.1
     k_a = 1.0
     k_c = 0.5
@@ -74,6 +36,7 @@ def run_caffeine_recommendation(conn):
     dose_unit = 100
     max_daily_dose = 300
 
+    # 模擬咖啡因影響與攝取建議
     recommendations = []
 
     for user_id, target_start_time, target_end_time in waking_periods:
@@ -98,8 +61,8 @@ def run_caffeine_recommendation(conn):
                 g_PD = np.ones_like(t, dtype=float)
                 P_t_caffeine = np.copy(P0_values)
                 intake_schedule = []
-                daily_dose = 0
 
+                daily_dose = 0
                 for hour in range(24):
                     if not awake_flags[hour]:
                         continue
@@ -114,12 +77,14 @@ def run_caffeine_recommendation(conn):
                             g_PD *= effect
                             P_t_caffeine = P0_values * g_PD
 
-                for user_id, hour, dose in intake_schedule:
-                    recommended_time = datetime.combine(datetime.today(), datetime.min.time()) + timedelta(hours=hour)
-                    recommendations.append((user_id, dose, recommended_time.strftime('%Y-%m-%d %H:%M:%S')))
+                # 如果沒有攝取建議，則存入 0
+                if not intake_schedule:
+                    recommendations.append((user_id, 0, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+                else:
+                    for user_id, hour, dose in intake_schedule:
+                        recommended_time = datetime.combine(datetime.today(), datetime.min.time()) + timedelta(hours=hour)
+                        recommendations.append((user_id, dose, recommended_time.strftime('%Y-%m-%d %H:%M:%S')))
 
-    execute_values(cursor,
-                   "INSERT INTO recommendations_caffeine (user_id, recommended_caffeine_amount, recommended_caffeine_intake_timing) VALUES %s",
-                   recommendations)
+    execute_values(cursor, "INSERT INTO recommendations_caffeine (user_id, recommended_caffeine_amount, recommended_caffeine_intake_timing) VALUES %s", recommendations)
     conn.commit()
     cursor.close()
