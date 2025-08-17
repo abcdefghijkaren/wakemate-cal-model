@@ -74,7 +74,10 @@ def run_alertness_data(conn):
         for i, time in enumerate(time_index):
             is_awake = True
             for row in sleep_data:
-                if row["start_time"] <= time < row["end_time"]:
+                # 將 row["start_time"] 和 row["end_time"] 轉換為 datetime.datetime 以進行比較
+                sleep_start = row["start_time"]
+                sleep_end = row["end_time"]
+                if sleep_start <= time < sleep_end:
                     is_awake = False
                     break
             awake_flags[i] = is_awake
