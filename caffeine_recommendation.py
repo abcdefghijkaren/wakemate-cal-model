@@ -1,4 +1,3 @@
-# caffeine_recommendation.py
 import numpy as np
 from psycopg2.extras import execute_values
 from datetime import datetime, timedelta, timezone
@@ -35,54 +34,61 @@ def run_caffeine_recommendation(conn):
         recommendations = []
 
         for user_id, target_start_time, target_end_time in waking_periods:
-            for user_id_sleep, start_time, end_time in sleep_data:
-                if user_id == user_id_sleep:
-                    # 使用今天的日期
-                    today = datetime.today().date()
-                    
-                    sleep_hour = start_time.hour
-                    wake_hour = end_time.hour
-                    total_hours = 24
-                    t = np.arange(0, total_hours + 1)
+            # 獲取該使用者的睡眠數據
+            user_sleep_data = [s for s in sleep_data if s[0] == user_id]
+            if not user_sleep_data:
+                continue  # 如果沒有該使用者的睡眠數據，則跳過
 
-                    def sigmoid(x, L=100, x0=14, k=0.2):
-                        return L / (1 + np.exp(-k * (x - x0)))
+            for user_id_sleep, start_time, end_time in user_sleep_data:
+                # 計算睡眠時間的前六小時
+                sleep_start = start_time - timedelta(hours=6)
 
-                    P0_values = np.zeros_like(t, dtype=float)
-                    awake_flags = np.ones_like(t, dtype=bool)
+                # 設定時間範圍
+                total_hours = 24
+                t = np.arange(0, total_hours + 1)
 
-                    for h in range(24):
-                        asleep = (h >= sleep_hour and h < wake_hour) if sleep_hour < wake_hour else (h >= sleep_hour or h < wake_hour)
-                        awake_flags[h] = not asleep
-                        P0_values[h] = P0_base + sigmoid(h) if not asleep else P0_base
+                def sigmoid(x, L=100, x0=14, k=0.2):
+                    return L / (1 + np.exp(-k * (x - x0)))
 
-                    g_PD = np.ones_like(t, dtype=float)
-                    P_t_caffeine = np.copy(P0_values)
-                    intake_schedule = []
+                P0_values = np.zeros_like(t, dtype=float)
+                awake_flags = np.ones_like(t, dtype=bool)
 
-                    daily_dose = 0
-                    for hour in range(24):
-                        if not awake_flags[hour]:
-                            continue
-                        if P_t_caffeine[hour] > 270:
-                            if daily_dose + dose_unit <= max_daily_dose:
-                                # 生成完整的日期時間
-                                recommended_time = datetime.combine(today, datetime.min.time()).replace(tzinfo=timezone.utc) + timedelta(hours=hour)
-                                intake_schedule.append((user_id, hour, dose_unit, recommended_time))
-                                daily_dose += dose_unit
-                                t_0 = hour
-                                effect = 1 / (1 + (M_c * dose_unit / 200) * (k_a / (k_a - k_c)) *
-                                            (np.exp(-k_c * (t - t_0)) - np.exp(-k_a * (t - t_0))))
-                                effect = np.where(t < t_0, 1, effect)
-                                g_PD *= effect
-                                P_t_caffeine = P0_values * g_PD
+                for h in range(24):
+                    asleep = (h >= start_time.hour and h < end_time.hour) if start_time.hour < end_time.hour else (h >= start_time.hour or h < end_time.hour)
+                    awake_flags[h] = not asleep
+                    P0_values[h] = P0_base + sigmoid(h) if not asleep else P0_base
 
-                    # 如果沒有攝取建議，則存入 0
-                    if not intake_schedule:
-                        recommendations.append((user_id, 0, datetime.combine(today, datetime.min.time())))
-                    else:
-                        for user_id, _, dose, recommended_time in intake_schedule:
-                            recommendations.append((user_id, dose, recommended_time))
+                g_PD = np.ones_like(t, dtype=float)
+                P_t_caffeine = np.copy(P0_values)
+                intake_schedule = []
+
+                daily_dose = 0
+                for hour in range(24):
+                    # 檢查是否在睡眠前六小時內
+                    if datetime.combine(datetime.today(), datetime.min.time()) + timedelta(hours=hour) < sleep_start:
+                        continue  # 在睡眠前六小時內，不推薦攝取咖啡因
+
+                    if not awake_flags[hour]:
+                        continue
+                    if P_t_caffeine[hour] > 270:
+                        if daily_dose + dose_unit <= max_daily_dose:
+                            # 生成完整的日期時間
+                            recommended_time = datetime.combine(datetime.today(), datetime.min.time()).replace(tzinfo=timezone.utc) + timedelta(hours=hour)
+                            intake_schedule.append((user_id, hour, dose_unit, recommended_time))
+                            daily_dose += dose_unit
+                            t_0 = hour
+                            effect = 1 / (1 + (M_c * dose_unit / 200) * (k_a / (k_a - k_c)) *
+                                           (np.exp(-k_c * (t - t_0)) - np.exp(-k_a * (t - t_0))))
+                            effect = np.where(t < t_0, 1, effect)
+                            g_PD *= effect
+                            P_t_caffeine = P0_values * g_PD
+
+                # 如果沒有攝取建議，則存入 0
+                if not intake_schedule:
+                    recommendations.append((user_id, 0, datetime.combine(datetime.today(), datetime.min.time())))
+                else:
+                    for user_id, _, dose, recommended_time in intake_schedule:
+                        recommendations.append((user_id, dose, recommended_time))
 
         # 插入建議到資料庫
         if recommendations:
