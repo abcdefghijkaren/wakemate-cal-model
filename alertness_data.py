@@ -130,7 +130,7 @@ def run_alertness_data(conn):
             """, (
                 caffeine_data[0]['user_id'],
                 time_index[i],
-                awake_flags[i],
+                bool(awake_flags[i]),  # 將 numpy.bool_ 轉換為 Python bool
                 float(g_PD[i]),
                 float(P0_values[i]),
                 float(P_t_caffeine[i]),
