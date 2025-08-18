@@ -1,7 +1,7 @@
 # caffeine_recommendation.py
 import numpy as np
 from psycopg2.extras import execute_values
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from database import get_db_connection
 
 def run_caffeine_recommendation(conn):
@@ -67,7 +67,7 @@ def run_caffeine_recommendation(conn):
                         if P_t_caffeine[hour] > 270:
                             if daily_dose + dose_unit <= max_daily_dose:
                                 # 生成完整的日期時間
-                                recommended_time = datetime.combine(today, datetime.min.time()) + timedelta(hours=hour)
+                                recommended_time = datetime.combine(today, datetime.min.time()).replace(tzinfo=timezone.utc) + timedelta(hours=hour)
                                 intake_schedule.append((user_id, hour, dose_unit, recommended_time))
                                 daily_dose += dose_unit
                                 t_0 = hour
