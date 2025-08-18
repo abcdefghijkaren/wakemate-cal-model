@@ -1,7 +1,7 @@
 # 清醒度數據計算邏輯 alertness_data.py
 
 import numpy as np
-from datetime import timedelta
+from datetime import datetime, timedelta
 from database import get_db_connection
 
 def fetch_alertness_data():
@@ -74,12 +74,13 @@ def run_alertness_data(conn):
         for i, time in enumerate(time_index):
             is_awake = True
             for row in sleep_data:
-                # 將 row["start_time"] 和 row["end_time"] 轉換為 datetime.datetime 以進行比較
+                # 確保比較的時間都是 datetime.datetime 物件
                 sleep_start = row["start_time"]
                 sleep_end = row["end_time"]
-                if sleep_start <= time < sleep_end:
-                    is_awake = False
-                    break
+                if isinstance(sleep_start, datetime) and isinstance(sleep_end, datetime):
+                    if sleep_start <= time < sleep_end:
+                        is_awake = False
+                        break
             awake_flags[i] = is_awake
             hour = time.hour
             P0_values[i] = P0_base + sigmoid(hour) if is_awake else P0_base
