@@ -40,7 +40,9 @@ def run_caffeine_recommendation(conn):
                 continue  # 如果沒有該使用者的睡眠數據，則跳過
 
             for user_id_sleep, start_time, end_time in user_sleep_data:
-                # 計算睡眠時間的前六小時
+                # 將時間轉換為偏移量有知的 datetime
+                start_time = start_time.replace(tzinfo=timezone.utc)
+                end_time = end_time.replace(tzinfo=timezone.utc)
                 sleep_start = start_time - timedelta(hours=6)
 
                 # 設定時間範圍
@@ -64,30 +66,27 @@ def run_caffeine_recommendation(conn):
 
                 daily_dose = 0
                 for hour in range(24):
+                    # 生成完整的日期時間
+                    recommended_time = datetime.combine(datetime.today(), datetime.min.time()).replace(tzinfo=timezone.utc) + timedelta(hours=hour)
+
                     # 檢查是否在睡眠前六小時內
-                    if datetime.combine(datetime.today(), datetime.min.time()) + timedelta(hours=hour) < sleep_start:
-                        continue  # 在睡眠前六小時內，不推薦攝取咖啡因
+                    if recommended_time < sleep_start:
+                        if not awake_flags[hour]:
+                            continue
+                        if P_t_caffeine[hour] > 270:
+                            if daily_dose + dose_unit <= max_daily_dose:
+                                intake_schedule.append((user_id, hour, dose_unit, recommended_time))
+                                daily_dose += dose_unit
+                                t_0 = hour
+                                effect = 1 / (1 + (M_c * dose_unit / 200) * (k_a / (k_a - k_c)) *
+                                               (np.exp(-k_c * (t - t_0)) - np.exp(-k_a * (t - t_0))))
+                                effect = np.where(t < t_0, 1, effect)
+                                g_PD *= effect
+                                P_t_caffeine = P0_values * g_PD
 
-                    if not awake_flags[hour]:
-                        continue
-                    if P_t_caffeine[hour] > 270:
-                        if daily_dose + dose_unit <= max_daily_dose:
-                            # 生成完整的日期時間
-                            recommended_time = datetime.combine(datetime.today(), datetime.min.time()).replace(tzinfo=timezone.utc) + timedelta(hours=hour)
-                            intake_schedule.append((user_id, hour, dose_unit, recommended_time))
-                            daily_dose += dose_unit
-                            t_0 = hour
-                            effect = 1 / (1 + (M_c * dose_unit / 200) * (k_a / (k_a - k_c)) *
-                                           (np.exp(-k_c * (t - t_0)) - np.exp(-k_a * (t - t_0))))
-                            effect = np.where(t < t_0, 1, effect)
-                            g_PD *= effect
-                            P_t_caffeine = P0_values * g_PD
-
-                # 如果沒有攝取建議，則存入 0
-                if not intake_schedule:
-                    recommendations.append((user_id, 0, datetime.combine(datetime.today(), datetime.min.time())))
-                else:
-                    for user_id, _, dose, recommended_time in intake_schedule:
+                # 檢查推薦時間是否在 target_start_time 和 target_end_time 之間
+                for user_id, _, dose, recommended_time in intake_schedule:
+                    if target_start_time <= recommended_time <= target_end_time:
                         recommendations.append((user_id, dose, recommended_time))
 
         # 插入建議到資料庫
