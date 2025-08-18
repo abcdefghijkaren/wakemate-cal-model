@@ -1,5 +1,3 @@
-# 清醒度數據計算邏輯 alertness_data.py
-
 import numpy as np
 from datetime import datetime, timedelta
 from database import get_db_connection
@@ -62,8 +60,8 @@ def run_alertness_data(conn):
             return
 
         # 設定計算的時間範圍
-        start_time = min(sleep_data[0]["start_time"], target_data[0]["target_start_time"]).replace(minute=0, second=0)
-        end_time = max(sleep_data[0]["end_time"], target_data[0]["target_end_time"]).replace(minute=0, second=0) + timedelta(hours=1)
+        start_time = min(sleep_data[0]["sleep_start_time"], target_data[0]["target_start_time"]).replace(minute=0, second=0)
+        end_time = max(sleep_data[0]["sleep_end_time"], target_data[0]["target_end_time"]).replace(minute=0, second=0) + timedelta(hours=1)
         total_hours = int((end_time - start_time).total_seconds() // 3600)
         time_index = [start_time + timedelta(hours=i) for i in range(total_hours + 1)]
         t = np.arange(total_hours + 1)
@@ -75,8 +73,8 @@ def run_alertness_data(conn):
             is_awake = True
             for row in sleep_data:
                 # 確保比較的時間都是 datetime.datetime 物件
-                sleep_start = row["start_time"]
-                sleep_end = row["end_time"]
+                sleep_start = row["sleep_start_time"]
+                sleep_end = row["sleep_end_time"]
                 if isinstance(sleep_start, datetime) and isinstance(sleep_end, datetime):
                     if sleep_start <= time < sleep_end:
                         is_awake = False
