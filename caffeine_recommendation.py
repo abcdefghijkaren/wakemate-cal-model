@@ -39,7 +39,7 @@ def run_caffeine_recommendation(conn):
             if not user_sleep_data:
                 continue  # 如果沒有該使用者的睡眠數據，則跳過
 
-            for user_id_sleep, start_time, end_time in user_sleep_data:
+            for user_id, start_time, end_time in user_sleep_data:
                 # 將時間轉換為偏移量有知的 datetime
                 start_time = start_time.replace(tzinfo=timezone.utc)
                 end_time = end_time.replace(tzinfo=timezone.utc)
