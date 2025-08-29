@@ -1,4 +1,4 @@
-# alertness_data.py
+# alertness_data.py 
 import numpy as np
 from datetime import timedelta
 from typing import List, Dict
@@ -47,10 +47,13 @@ def run_alertness_data(conn):
         M_c = 1.1
         k_a = 1.0
         k_c = 0.5
-        P0_base = 270
+        P0_base = 270  # 固定基線
 
         def sigmoid(x, L=100, x0=14, k=0.2):
             return L / (1 + np.exp(-k * (x - x0)))
+
+        def safe_float(val, default=0.0):
+            return float(val) if np.isfinite(val) else default
 
         for uid in user_ids:
             latest_source_ts = _get_latest_source_ts(cur, uid)
@@ -78,7 +81,6 @@ def run_alertness_data(conn):
             target_rows = cur.fetchall()
 
             if not sleep_rows or not target_rows:
-                # 兩種都需要
                 continue
 
             cur.execute("""
@@ -104,18 +106,16 @@ def run_alertness_data(conn):
             time_index = [min_start + timedelta(hours=i) for i in range(total_hours + 1)]
             t = np.arange(total_hours + 1)
 
-            # 計算每個小時是否清醒 & P0
+            # 計算每個小時是否清醒 & P0_values 固定 270
             awake_flags = np.ones(len(time_index), dtype=bool)
-            P0_values = np.zeros(len(time_index), dtype=float)
+            P0_values = np.full(len(time_index), P0_base, dtype=float)
 
             for i, now_dt in enumerate(time_index):
                 asleep = any(start <= now_dt < end for (start, end) in sleep_rows)
                 awake_flags[i] = (not asleep)
-                P0_values[i] = P0_base + sigmoid(now_dt.hour) if awake_flags[i] else P0_base
 
             # 咖啡因影響 g_PD
             g_PD = np.ones(len(time_index), dtype=float)
-
             if caf_rows:
                 for take_time, dose in caf_rows:
                     dose = float(dose)
@@ -128,19 +128,15 @@ def run_alertness_data(conn):
                     g_PD *= effect
 
             P_t_caffeine = P0_values * g_PD
-
-            # 真實路徑（目前與模擬一致；保留介面以便未來替換）
+            P_t_no_caffeine = np.copy(P0_values)
             g_PD_real = np.copy(g_PD)
             P_t_real = P0_values * g_PD_real
 
-            P_t_no_caffeine = np.copy(P0_values)
+            # 睡覺時段 NaN → 存 0
+            for arr in [P_t_caffeine, P_t_no_caffeine, P_t_real]:
+                arr[~awake_flags] = 0.0
 
-            # 睡覺時段設成 NaN（視覺化時會斷線）
-            P_t_caffeine[~awake_flags] = np.nan
-            P_t_no_caffeine[~awake_flags] = np.nan
-            P_t_real[~awake_flags] = np.nan
-
-            # （可選）清掉舊 snapshot，避免越存越大
+            # 清掉舊 snapshot
             cur.execute("""
                 DELETE FROM alertness_data_for_visualization
                 WHERE user_id = %s
@@ -156,13 +152,12 @@ def run_alertness_data(conn):
                     bool(awake_flags[i]),
                     float(g_PD[i]),
                     float(P0_values[i]),
-                    float(P_t_caffeine[i]) if np.isfinite(P_t_caffeine[i]) else None,
-                    float(P_t_no_caffeine[i]) if np.isfinite(P_t_no_caffeine[i]) else None,
-                    float(P_t_real[i]) if np.isfinite(P_t_real[i]) else None,
+                    float(P_t_caffeine[i]),
+                    float(P_t_no_caffeine[i]),
+                    float(P_t_real[i]),
                     latest_source_ts
                 ))
 
-            # 用 execute_values 批量寫入會更快，但欄位裡有 None/NaN 時逐筆也沒問題
             from psycopg2.extras import execute_values as _ev
             _ev(cur, """
                 INSERT INTO alertness_data_for_visualization
