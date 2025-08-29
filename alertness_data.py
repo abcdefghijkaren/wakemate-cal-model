@@ -1,51 +1,49 @@
+# alertness_data.py
 import numpy as np
-from datetime import datetime, timedelta
-from database import get_db_connection
+from datetime import timedelta
+from typing import List, Dict
 
-def fetch_alertness_data():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("SELECT * FROM alertness_data_for_visualization;")
-        rows = cursor.fetchall()
-        colnames = [desc[0] for desc in cursor.description]
-    except Exception as e:
-        print(f"查詢 alertness_data_for_visualization 失敗: {e}")
-        return []
-    finally:
-        cursor.close()
-        conn.close()
+def _get_user_ids_for_alertness(cursor):
+    cursor.execute("""
+        SELECT DISTINCT user_id FROM (
+            SELECT user_id FROM users_target_waking_period
+            UNION
+            SELECT user_id FROM users_real_sleep_data
+            UNION
+            SELECT user_id FROM users_real_time_intake
+        ) AS u
+    """)
+    return [row[0] for row in cursor.fetchall()]
 
-    if not rows:
-        return []
+def _get_latest_source_ts(cursor, user_id):
+    cursor.execute("""
+        SELECT GREATEST(
+            COALESCE((SELECT MAX(updated_at) FROM users_target_waking_period WHERE user_id = %s), to_timestamp(0)),
+            COALESCE((SELECT MAX(updated_at) FROM users_real_sleep_data    WHERE user_id = %s), to_timestamp(0)),
+            COALESCE((SELECT MAX(updated_at) FROM users_real_time_intake  WHERE user_id = %s), to_timestamp(0))
+        )
+    """, (user_id, user_id, user_id))
+    (ts,) = cursor.fetchone()
+    return ts
 
-    # 將資料轉換為字典列表
-    data = [dict(zip(colnames, row)) for row in rows]
-    return data
+def _get_last_processed_ts_for_alert(cursor, user_id):
+    cursor.execute("""
+        SELECT COALESCE(MAX(source_data_latest_at), to_timestamp(0))
+        FROM alertness_data_for_visualization
+        WHERE user_id = %s
+    """, (user_id,))
+    (ts,) = cursor.fetchone()
+    return ts
 
 def run_alertness_data(conn):
-    cursor = conn.cursor()
-
+    cur = conn.cursor()
     try:
-        # 獲取咖啡因攝取數據
-        cursor.execute("SELECT * FROM users_real_time_intake;")
-        rows = cursor.fetchall()
-        colnames = [desc[0] for desc in cursor.description]
-        caffeine_data = [dict(zip(colnames, row)) for row in rows]
+        user_ids = _get_user_ids_for_alertness(cur)
+        if not user_ids:
+            print("缺少必要的輸入資料，無法計算清醒度。")
+            return
 
-        # 獲取睡眠數據
-        cursor.execute("SELECT * FROM users_real_sleep_data;")
-        rows = cursor.fetchall()
-        colnames = [desc[0] for desc in cursor.description]
-        sleep_data = [dict(zip(colnames, row)) for row in rows]
-
-        # 獲取清醒時段數據
-        cursor.execute("SELECT * FROM users_target_waking_period;")
-        rows = cursor.fetchall()
-        colnames = [desc[0] for desc in cursor.description]
-        target_data = [dict(zip(colnames, row)) for row in rows]
-
-        # 設定參數
+        # 參數
         M_c = 1.1
         k_a = 1.0
         k_c = 0.5
@@ -54,90 +52,128 @@ def run_alertness_data(conn):
         def sigmoid(x, L=100, x0=14, k=0.2):
             return L / (1 + np.exp(-k * (x - x0)))
 
-        # 確保有足夠的數據進行計算
-        if not sleep_data or not target_data:
-            print("缺少睡眠數據或清醒時段數據，無法計算。")
-            return
+        for uid in user_ids:
+            latest_source_ts = _get_latest_source_ts(cur, uid)
+            last_processed_ts = _get_last_processed_ts_for_alert(cur, uid)
 
-        # 設定計算的時間範圍
-        start_time = min(sleep_data[0]["sleep_start_time"], target_data[0]["target_start_time"]).replace(minute=0, second=0)
-        end_time = max(sleep_data[0]["sleep_end_time"], target_data[0]["target_end_time"]).replace(minute=0, second=0) + timedelta(hours=1)
-        total_hours = int((end_time - start_time).total_seconds() // 3600)
-        time_index = [start_time + timedelta(hours=i) for i in range(total_hours + 1)]
-        t = np.arange(total_hours + 1)
-
-        awake_flags = np.ones(len(time_index), dtype=bool)
-        P0_values = np.zeros(len(time_index), dtype=float)
-
-        for i, time in enumerate(time_index):
-            is_awake = True
-            for row in sleep_data:
-                # 確保比較的時間都是 datetime.datetime 物件
-                sleep_start = row["sleep_start_time"]
-                sleep_end = row["sleep_end_time"]
-                if isinstance(sleep_start, datetime) and isinstance(sleep_end, datetime):
-                    if sleep_start <= time < sleep_end:
-                        is_awake = False
-                        break
-            awake_flags[i] = is_awake
-            hour = time.hour
-            P0_values[i] = P0_base + sigmoid(hour) if is_awake else P0_base
-
-        g_PD = np.ones(len(time_index), dtype=float)
-
-        # 如果沒有咖啡因數據，則默認攝取量為 0
-        if not caffeine_data:
-            caffeine_data = [{'taking_timestamp': start_time, 'caffeine_amount': 0, 'user_id': target_data[0]['user_id']}]
-
-        for row in caffeine_data:
-            take_time = row["taking_timestamp"]
-            dose = float(row["caffeine_amount"])
-            t_0 = int((take_time - start_time).total_seconds() // 3600)
-            if t_0 >= len(t):
+            # 沒新資料 → 跳過
+            if latest_source_ts <= last_processed_ts:
                 continue
-            effect = 1 / (1 + (M_c * dose / 200) * (k_a / (k_a - k_c)) *
-                          (np.exp(-k_c * (t - t_0)) - np.exp(-k_a * (t - t_0))))
-            effect = np.where(t < t_0, 1, effect)
-            g_PD *= effect
 
-        P_t_caffeine = P0_values * g_PD
+            # 取各表資料（單一使用者）
+            cur.execute("""
+                SELECT sleep_start_time, sleep_end_time
+                FROM users_real_sleep_data
+                WHERE user_id = %s
+                ORDER BY sleep_start_time
+            """, (uid,))
+            sleep_rows = cur.fetchall()
 
-        g_PD_real = np.ones(len(time_index), dtype=float)
-        for row in caffeine_data:
-            take_time = row["taking_timestamp"]
-            dose = float(row["caffeine_amount"])
-            t_0 = int((take_time - start_time).total_seconds() // 3600)
-            if t_0 >= len(t):
+            cur.execute("""
+                SELECT target_start_time, target_end_time
+                FROM users_target_waking_period
+                WHERE user_id = %s
+                ORDER BY target_start_time
+            """, (uid,))
+            target_rows = cur.fetchall()
+
+            if not sleep_rows or not target_rows:
+                # 兩種都需要
                 continue
-            effect = 1 / (1 + (M_c * dose / 200) * (k_a / (k_a - k_c)) *
-                          (np.exp(-k_c * (t - t_0)) - np.exp(-k_a * (t - t_0))))
-            effect = np.where(t < t_0, 1, effect)
-            g_PD_real *= effect
 
-        P_t_real = P0_values * g_PD_real
-        P_t_no_caffeine = P0_values.copy()
+            cur.execute("""
+                SELECT taking_timestamp, caffeine_amount
+                FROM users_real_time_intake
+                WHERE user_id = %s
+                ORDER BY taking_timestamp
+            """, (uid,))
+            caf_rows = cur.fetchall()
 
-        P_t_caffeine[~awake_flags] = np.nan
-        P_t_no_caffeine[~awake_flags] = np.nan
-        P_t_real[~awake_flags] = np.nan
+            # 設定計算時間範圍
+            min_start = min(
+                min(r[0] for r in sleep_rows),
+                min(r[0] for r in target_rows)
+            ).replace(minute=0, second=0, microsecond=0)
 
-        for i in range(len(time_index)):
-            cursor.execute("""
-                INSERT INTO alertness_data_for_visualization (user_id, timestamp, awake, "g_PD", "P0_values", "P_t_caffeine", "P_t_no_caffeine", "P_t_real")
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            """, (
-                caffeine_data[0]['user_id'],
-                time_index[i],
-                bool(awake_flags[i]),  # 將 numpy.bool_ 轉換為 Python bool
-                float(g_PD[i]),
-                float(P0_values[i]),
-                float(P_t_caffeine[i]),
-                float(P_t_no_caffeine[i]),
-                float(P_t_real[i])
-            ))
+            max_end = max(
+                max(r[1] for r in sleep_rows),
+                max(r[1] for r in target_rows)
+            ).replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
 
-        conn.commit()
+            total_hours = int((max_end - min_start).total_seconds() // 3600)
+            time_index = [min_start + timedelta(hours=i) for i in range(total_hours + 1)]
+            t = np.arange(total_hours + 1)
+
+            # 計算每個小時是否清醒 & P0
+            awake_flags = np.ones(len(time_index), dtype=bool)
+            P0_values = np.zeros(len(time_index), dtype=float)
+
+            for i, now_dt in enumerate(time_index):
+                asleep = any(start <= now_dt < end for (start, end) in sleep_rows)
+                awake_flags[i] = (not asleep)
+                P0_values[i] = P0_base + sigmoid(now_dt.hour) if awake_flags[i] else P0_base
+
+            # 咖啡因影響 g_PD
+            g_PD = np.ones(len(time_index), dtype=float)
+
+            if caf_rows:
+                for take_time, dose in caf_rows:
+                    dose = float(dose)
+                    t_0 = int((take_time - min_start).total_seconds() // 3600)
+                    if t_0 >= len(t):
+                        continue
+                    effect = 1 / (1 + (M_c * dose / 200) * (k_a / (k_a - k_c)) *
+                                  (np.exp(-k_c * (t - t_0)) - np.exp(-k_a * (t - t_0))))
+                    effect = np.where(t < t_0, 1, effect)
+                    g_PD *= effect
+
+            P_t_caffeine = P0_values * g_PD
+
+            # 真實路徑（目前與模擬一致；保留介面以便未來替換）
+            g_PD_real = np.copy(g_PD)
+            P_t_real = P0_values * g_PD_real
+
+            P_t_no_caffeine = np.copy(P0_values)
+
+            # 睡覺時段設成 NaN（視覺化時會斷線）
+            P_t_caffeine[~awake_flags] = np.nan
+            P_t_no_caffeine[~awake_flags] = np.nan
+            P_t_real[~awake_flags] = np.nan
+
+            # （可選）清掉舊 snapshot，避免越存越大
+            cur.execute("""
+                DELETE FROM alertness_data_for_visualization
+                WHERE user_id = %s
+                  AND (source_data_latest_at IS NULL OR source_data_latest_at < %s)
+            """, (uid, latest_source_ts))
+
+            # 逐列插入
+            insert_rows = []
+            for i, now_dt in enumerate(time_index):
+                insert_rows.append((
+                    uid,
+                    now_dt,
+                    bool(awake_flags[i]),
+                    float(g_PD[i]),
+                    float(P0_values[i]),
+                    float(P_t_caffeine[i]) if np.isfinite(P_t_caffeine[i]) else None,
+                    float(P_t_no_caffeine[i]) if np.isfinite(P_t_no_caffeine[i]) else None,
+                    float(P_t_real[i]) if np.isfinite(P_t_real[i]) else None,
+                    latest_source_ts
+                ))
+
+            # 用 execute_values 批量寫入會更快，但欄位裡有 None/NaN 時逐筆也沒問題
+            from psycopg2.extras import execute_values as _ev
+            _ev(cur, """
+                INSERT INTO alertness_data_for_visualization
+                (user_id, timestamp, awake, "g_PD", "P0_values", "P_t_caffeine", "P_t_no_caffeine", "P_t_real", source_data_latest_at)
+                VALUES %s
+            """, insert_rows)
+
+            conn.commit()
+
     except Exception as e:
+        conn.rollback()
         print(f"執行清醒度數據計算時發生錯誤: {e}")
     finally:
-        cursor.close()
+        cur.close()
