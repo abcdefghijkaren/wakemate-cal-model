@@ -198,7 +198,7 @@ def run_alertness_data(conn):
 
             execute_values(cur, """
                 INSERT INTO alertness_data_for_visualization
-                (user_id, timestamp, awake, g_PD_rec, g_PD_real, P0_values, P_t_caffeine, P_t_no_caffeine, P_t_real, updated_at)
+                (user_id, timestamp, awake, g_PD_rec, g_PD_real, P0_values, P_t_caffeine, P_t_no_caffeine, P_t_real, source_data_latest_at)
                 VALUES %s
             """, insert_rows)
 
