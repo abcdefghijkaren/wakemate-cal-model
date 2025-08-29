@@ -48,7 +48,7 @@ def run_alertness_data(conn):
         M_c = 1.1
         k_a = 1.0
         k_c = 0.5
-        P0_base = 270.0  # 固定基線 (ms)
+        P0_base = 270.0  # 固定輸出基準
 
         def sigmoid(x, L=100, x0=14, k=0.2):
             return L / (1 + np.exp(-k * (x - x0)))
@@ -63,11 +63,10 @@ def run_alertness_data(conn):
             latest_source_ts = _get_latest_source_ts(cur, uid)
             last_processed_ts = _get_last_processed_ts_for_alert(cur, uid)
 
-            # 沒新資料 → 跳過
             if latest_source_ts <= last_processed_ts:
                 continue
 
-            # 取各表資料（單一使用者）
+            # 取各表資料
             cur.execute("""
                 SELECT sleep_start_time, sleep_end_time
                 FROM users_real_sleep_data
@@ -85,29 +84,25 @@ def run_alertness_data(conn):
             target_rows = cur.fetchall()
 
             if not sleep_rows or not target_rows:
-                # 兩者皆需，否則無法得出合理範圍
                 continue
 
-            # 取實際攝取（users_real_time_intake）
             cur.execute("""
                 SELECT taking_timestamp, caffeine_amount
                 FROM users_real_time_intake
                 WHERE user_id = %s
                 ORDER BY taking_timestamp
             """, (uid,))
-            caf_rows = cur.fetchall()  # list of (taking_timestamp, caffeine_amount)
+            caf_rows = cur.fetchall()
 
-            # 取建議攝取（recommendations_caffeine）作為 "recommended schedule"
-            # 注意：recommendations_caffeine 的 recommended_caffeine_intake_timing 須為 timestamp
             cur.execute("""
                 SELECT recommended_caffeine_amount, recommended_caffeine_intake_timing
                 FROM recommendations_caffeine
                 WHERE user_id = %s
                 ORDER BY recommended_caffeine_intake_timing
             """, (uid,))
-            rec_rows = cur.fetchall()  # list of (amount, datetime)
+            rec_rows = cur.fetchall()
 
-            # 設定計算時間範圍（以 sleep 與 target 的 min/max 為準）
+            # 計算時間範圍
             min_start = min(
                 min(r[0] for r in sleep_rows),
                 min(r[0] for r in target_rows)
@@ -125,32 +120,35 @@ def run_alertness_data(conn):
             time_index = [min_start + timedelta(hours=i) for i in range(total_hours + 1)]
             t = np.arange(total_hours + 1)
 
-            # 計算每個小時是否清醒 & P0_values 固定 270
+            # 計算 awake_flags
             awake_flags = np.ones(len(time_index), dtype=bool)
-            P0_values = np.full(len(time_index), P0_base, dtype=float)
-
             for i, now_dt in enumerate(time_index):
                 asleep = any(start <= now_dt < end for (start, end) in sleep_rows)
                 awake_flags[i] = (not asleep)
 
-            # ---------- 計算 g_PD_real（使用者真實攝取） ----------
+            # ---------- P_t_no_caffeine (自然清醒度) ----------
+            P_t_no_caffeine = np.zeros(len(time_index), dtype=float)
+            for i, now_dt in enumerate(time_index):
+                hour = now_dt.hour
+                P_t_no_caffeine[i] = P0_base + sigmoid(hour) if awake_flags[i] else P0_base
+
+            # ---------- P0_values (固定 270) ----------
+            P0_values = np.full(len(time_index), P0_base, dtype=float)
+
+            # ---------- g_PD_real ----------
             g_PD_real = np.ones(len(time_index), dtype=float)
             if caf_rows:
                 for take_time, dose in caf_rows:
                     dose = safe_float(dose, 0.0)
-                    # 計算相對小時索引
                     t_0 = int((take_time - min_start).total_seconds() // 3600)
-                    # 若 t_0 超出範圍就跳過
-                    if t_0 >= len(t) or t_0 < -10000:  # 大幅負數視為不合理，保險處理
+                    if t_0 >= len(t) or t_0 < -10000:
                         continue
-                    # effect 的向量計算（同 formula）
                     effect = 1 / (1 + (M_c * dose / 200) * (k_a / (k_a - k_c)) *
                                   (np.exp(-k_c * (t - t_0)) - np.exp(-k_a * (t - t_0))))
-                    # 在 t < t_0 時設定 effect=1（尚未起效）
                     effect = np.where(t < t_0, 1.0, effect)
                     g_PD_real *= effect
 
-            # ---------- 計算 g_PD_rec（建議攝取） ----------
+            # ---------- g_PD_rec ----------
             g_PD_rec = np.ones(len(time_index), dtype=float)
             if rec_rows:
                 for rec_amount, rec_time in rec_rows:
@@ -163,27 +161,26 @@ def run_alertness_data(conn):
                     effect = np.where(t < t_0, 1.0, effect)
                     g_PD_rec *= effect
 
-            # P_t 計算
-            P_t_no_caffeine = np.copy(P0_values)             # 若完全不攝取
-            P_t_caffeine = P0_values * g_PD_rec              # 若依照建議攝取
-            P_t_real = P0_values * g_PD_real                 # 實際攝取情況
+            # ---------- P_t 計算 ----------
+            P_t_caffeine = P_t_no_caffeine * g_PD_rec
+            P_t_real = P_t_no_caffeine * g_PD_real
 
-            # 睡覺時段值改成 0.0（避免 NULL，且表明非觀察）
+            # 睡眠時間改為 0.0
             for arr in (P_t_caffeine, P_t_no_caffeine, P_t_real):
                 arr[~awake_flags] = 0.0
 
-            # 刪除舊 snapshot（若存在較舊的 source_data_latest_at）
+            # 設置睡眠時間為 NULL（NaN）
+            for arr, g_arr in ((P_t_caffeine, g_PD_rec), (P_t_no_caffeine, g_PD_rec), (P_t_real, g_PD_real)):
+                arr[~awake_flags] = np.nan
+
+            # 刪除舊 snapshot
             cur.execute("""
                 DELETE FROM alertness_data_for_visualization
                 WHERE user_id = %s
                   AND (source_data_latest_at IS NULL OR source_data_latest_at < %s)
             """, (uid, latest_source_ts))
 
-            # 設置睡眠時段值為 NULL
-            for arr, g_arr in ((P_t_caffeine, g_PD_rec), (P_t_no_caffeine, g_PD_rec), (P_t_real, g_PD_real)):
-                arr[~awake_flags] = np.nan  # NaN 會被 psycopg2 轉成 NULL
-
-            # 準備插入
+            # 插入資料庫
             insert_rows = []
             for i, now_dt in enumerate(time_index):
                 insert_rows.append((
