@@ -4,6 +4,29 @@ from database import get_db_connection
 from caffeine_recommendation import run_caffeine_recommendation
 from alertness_data import run_alertness_data
 
+def get_user_params(conn):
+    """
+    從 users_params 撈取所有使用者的 M_c, k_a, k_c
+    回傳 dict: { user_id: {"M_c": x, "k_a": y, "k_c": z}, ... }
+    """
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT user_id, M_c, k_a, k_c
+            FROM users_params
+        """)
+        rows = cur.fetchall()
+        params_map = {}
+        for user_id, M_c, k_a, k_c in rows:
+            params_map[user_id] = {
+                "M_c": M_c,
+                "k_a": k_a,
+                "k_c": k_c
+            }
+        return params_map
+    finally:
+        cur.close()
+
 def main():
     conn = None
     try:
@@ -13,8 +36,12 @@ def main():
             return
 
         try:
-            # 先跑建議（只會對有「新資料」的使用者動作）
-            run_caffeine_recommendation(conn)
+            # 取所有使用者的個人化參數
+            user_params_map = get_user_params(conn)
+
+            # 先跑咖啡因建議（傳入個人化參數）
+            run_caffeine_recommendation(conn, user_params_map)
+
             # 再跑清醒度（同樣只處理有「新資料」的使用者）
             run_alertness_data(conn)
         except Exception as e:
