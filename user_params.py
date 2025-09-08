@@ -73,7 +73,7 @@ def fit_user_params(conn, user_id):
     需要資料表：
       - users_real_time_intake(user_id, taking_timestamp, caffeine_amount)
       - users_real_sleep_data(user_id, sleep_start_time, sleep_end_time)
-      - users_pvt_results(user_id, test_time, reaction_time_ms)  ← 欄位名稱請對照你的實際表
+      - users_pvt_results(user_id, test_at, mean_rt)  ← 欄位名稱請對照你的實際表
     """
     cur = conn.cursor()
     try:
@@ -98,13 +98,12 @@ def fit_user_params(conn, user_id):
             return  # 無足夠資料不校準
         sleep_intervals = [(r[0], r[1]) for r in sleep_rows]
 
-        # 取 PVT 觀測
-        # 請把下列欄位換成你的實際欄位名稱（例如 test_timestamp, pvt_ms 等）
+        # 取 PVT
         cur.execute("""
-            SELECT test_time, reaction_time_ms
+            SELECT test_at, mean_rt
             FROM users_pvt_results
             WHERE user_id = %s
-            ORDER BY test_time
+            ORDER BY test_at
         """, (user_id,))
         pvt_rows = cur.fetchall()
         if not pvt_rows:
